@@ -3,7 +3,7 @@
 class MouseStatus {
     __New(renderTooltip := true) {
         this.tooltipEnabled := renderTooltip
-        this.warningLocked := false
+        this.warningVisible := false
         this.visible := false
         this.lastText := ""
         this.lastKind := ""
@@ -17,25 +17,21 @@ class MouseStatus {
             SetTimer(this.followTimer, 25)
     }
 
-    ShowSuccess(text, ttlMs := 2500) {
-        if this.warningLocked
-            return false
-        return this.ShowMessage(text, "success", ttlMs)
+    ; 保留既有參數以相容呼叫；提示一律常駐，由下一個動作更新。
+    ShowSuccess(text, ttlMs := 0) {
+        return this.ShowMessage(text, "success", 0)
     }
 
-    ShowInfo(text, sticky := false) {
-        if this.warningLocked
-            return false
-        return this.ShowMessage(text, "info", sticky ? 0 : 2500)
+    ShowInfo(text, sticky := true) {
+        return this.ShowMessage(text, "info", 0)
     }
 
     ShowWarning(text) {
-        this.warningLocked := true
-        return this.ShowMessage(text, "warning", 0, true)
+        return this.ShowMessage(text, "warning", 0)
     }
 
     ClearWarning() {
-        this.warningLocked := false
+        this.warningVisible := false
         this.lastText := ""
         this.lastKind := ""
         this.visible := false
@@ -47,13 +43,11 @@ class MouseStatus {
     }
 
     HasWarning() {
-        return this.warningLocked
+        return this.warningVisible
     }
 
-    ShowMessage(text, kind, ttlMs := 0, force := false) {
-        if this.warningLocked && kind != "warning" && !force
-            return false
-
+    ShowMessage(text, kind, ttlMs := 0) {
+        this.warningVisible := kind = "warning"
         this.lastText := text
         this.lastKind := kind
         this.visible := true
@@ -91,7 +85,7 @@ class MouseStatus {
     }
 
     HideExpired() {
-        if !this.tooltipEnabled || this.warningLocked
+        if !this.tooltipEnabled || this.warningVisible
             return
 
         this.visible := false
@@ -99,7 +93,7 @@ class MouseStatus {
     }
 
     Shutdown() {
-        this.warningLocked := false
+        this.warningVisible := false
         this.visible := false
 
         if this.tooltipEnabled {

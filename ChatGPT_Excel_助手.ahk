@@ -17,19 +17,32 @@ class ChatGPTExcelAssistant {
         this.cleanedUp := false
         this.excel := 0
         this.workbook := 0
+        this.platform := 0
+        this.platformSelection := ""
         this.questionStart := 0
         this.answerStart := 0
+        this.citationStart := 0
         this.rowOffset := 0
+        this.citationColumnOffset := 0
+        this.lastSentQuestion := ""
+        this.lastSavedAnswer := ""
+        this.closeContext := ""
+        this.urlCopyVersion := 0
         this.status := MouseStatus(true)
         this.hotIfHandler := 0
         this.exitHandler := 0
     }
 
     Initialize() {
+        platformKey := this.SelectPlatform()
+        if platformKey = ""
+            return false
+        this.platform := GetPlatformConfig(platformKey)
+
         workbookPath := FileSelect(
             3,
             ,
-            "選擇含有問題與回答欄位的 Excel 活頁簿",
+            "選擇含有問題、回答與引用網址欄位的 Excel 活頁簿",
             "Excel 活頁簿 (*.xlsx; *.xlsm; *.xls)"
         )
 
@@ -64,6 +77,13 @@ class ChatGPTExcelAssistant {
         if !IsObject(this.answerStart)
             return false
 
+        this.citationStart := this.SelectSingleRange(
+            "請在同一本活頁簿中點選『引用網址起始格』，再按確定。",
+            "選擇引用網址起始格"
+        )
+        if !IsObject(this.citationStart)
+            return false
+
         this.RegisterHotkeys()
         this.exitHandler := ObjBindMethod(this, "HandleExit")
         OnExit(this.exitHandler)
@@ -73,11 +93,51 @@ class ChatGPTExcelAssistant {
             BuildStatus(
                 "ready",
                 this.CellLabel(ranges.question),
-                this.CellLabel(ranges.answer)
+                this.CellLabel(ranges.answer),
+                "",
+                "",
+                this.CellLabel(ranges.citation),
+                "",
+                this.platform.name
             ),
             2500
         )
         return true
+    }
+
+    SelectPlatform() {
+        this.platformSelection := ""
+        picker := Gui("+AlwaysOnTop -MinimizeBox", "選擇 AI 平台")
+        picker.SetFont("s10", "Microsoft JhengHei UI")
+        picker.AddText("w330", "請選擇本次要使用的網頁版 AI 平台：")
+        gptButton := picker.AddButton("xm y+12 w160 h36 Default", "GPT（ChatGPT）")
+        geminiButton := picker.AddButton("x+10 yp w160 h36", "Gemini")
+        cancelButton := picker.AddButton("xm y+12 w330", "取消")
+
+        gptButton.OnEvent(
+            "Click",
+            ObjBindMethod(this, "ChoosePlatform", picker, "gpt")
+        )
+        geminiButton.OnEvent(
+            "Click",
+            ObjBindMethod(this, "ChoosePlatform", picker, "gemini")
+        )
+        cancelButton.OnEvent("Click", ObjBindMethod(this, "CancelPlatform", picker))
+        picker.OnEvent("Close", ObjBindMethod(this, "CancelPlatform", picker))
+
+        picker.Show("AutoSize")
+        WinWaitClose("ahk_id " . picker.Hwnd)
+        return this.platformSelection
+    }
+
+    ChoosePlatform(picker, platformKey, *) {
+        this.platformSelection := platformKey
+        picker.Destroy()
+    }
+
+    CancelPlatform(picker, *) {
+        this.platformSelection := ""
+        picker.Destroy()
     }
 
     SelectSingleRange(prompt, title) {
@@ -104,7 +164,7 @@ class ChatGPTExcelAssistant {
 
             selectedWorkbookPath := selected.Parent.Parent.FullName
             if StrLower(selectedWorkbookPath) != StrLower(this.workbook.FullName) {
-                MsgBox("問題格與回答格必須位於剛才選擇的活頁簿。", "ChatGPT Excel AHK", "Iconx")
+                MsgBox("所有起始格必須位於剛才選擇的活頁簿。", "ChatGPT Excel AHK", "Iconx")
                 return 0
             }
         } catch Error as err {
@@ -125,11 +185,12 @@ class ChatGPTExcelAssistant {
 
         this.hotIfHandler := ObjBindMethod(this, "ActionsEnabled")
         HotIf(this.hotIfHandler)
-        Hotkey("z", ObjBindMethod(this, "OpenIncognitoChatGPT"))
+        Hotkey("z", ObjBindMethod(this, "OpenSelectedPlatform"))
         Hotkey("x", ObjBindMethod(this, "SendCurrentQuestion"))
         Hotkey("c", ObjBindMethod(this, "CopyAndSaveAnswer"))
+        Hotkey("s", ObjBindMethod(this, "SaveCurrentUrl"))
         Hotkey("v", ObjBindMethod(this, "DismissWarning"))
-        Hotkey("a", ObjBindMethod(this, "CloseFocusedChromeWindow"))
+        Hotkey("a", ObjBindMethod(this, "CloseFocusedChromeTab"))
         HotIf()
     }
 
@@ -138,6 +199,7 @@ class ChatGPTExcelAssistant {
     }
 
     ToggleEnabled(*) {
+        this.urlCopyVersion += 1
         this.enabled := !this.enabled
         if this.enabled {
             ranges := this.CurrentRanges()
@@ -150,10 +212,8 @@ class ChatGPTExcelAssistant {
         }
     }
 
-    OpenIncognitoChatGPT(*) {
-        if !this.CanRunAction()
-            return
-
+    OpenSelectedPlatform(*) {
+        this.urlCopyVersion += 1
         chromePath := this.FindChromePath()
         if chromePath = "" {
             this.status.ShowWarning(BuildStatus("chrome_missing"))
@@ -163,7 +223,7 @@ class ChatGPTExcelAssistant {
         quote := Chr(34)
         command := quote . chromePath . quote
             . " --incognito --new-window "
-            . quote . "https://chatgpt.com/" . quote
+            . quote . this.platform.url . quote
 
         try Run(command)
         catch Error {
@@ -171,12 +231,12 @@ class ChatGPTExcelAssistant {
             return
         }
 
+        this.closeContext := ""
         this.ShowCurrentQuestionPreview()
     }
 
     SendCurrentQuestion(*) {
-        if !this.CanRunAction()
-            return
+        this.urlCopyVersion += 1
         if !this.IsFocusedChrome() {
             this.status.ShowWarning(BuildStatus("wrong_window"))
             return
@@ -201,25 +261,139 @@ class ChatGPTExcelAssistant {
         Send("^v")
         Sleep(Random(180, 350))
         Send("{Enter}")
+        this.lastSentQuestion := questionText
+        this.closeContext := ""
         this.status.ShowSuccess(BuildStatus("sent", questionLabel), 2500)
     }
 
-    CopyAndSaveAnswer(*) {
-        if !this.CanRunAction()
-            return
+    SaveCurrentUrl(*) {
+        this.urlCopyVersion += 1
         if !this.IsFocusedChrome() {
             this.status.ShowWarning(BuildStatus("wrong_window"))
             return
         }
 
-        answerText := A_Clipboard
-        if Trim(answerText) = "" {
-            this.status.ShowWarning(BuildStatus("copy_failed"))
+        chromeHwnd := WinExist("A")
+        copyVersion := this.urlCopyVersion
+        this.status.ShowInfo(BuildStatus("url_copying"), true)
+        copyResult := ReadSourceUrlWithRetry(
+            ObjBindMethod(this, "CopyAddressBarAttempt", chromeHwnd, copyVersion)
+        )
+        if copyResult.issue = "cancelled"
+            return
+        if copyResult.issue != "" {
+            this.status.ShowWarning(BuildStatus(copyResult.issue))
+            return
+        }
+        sourceUrl := copyResult.url
+
+        ranges := this.CurrentRanges()
+        citationLabel := this.CellLabel(ranges.citation)
+        if !this.ConfirmOverwrite(ranges.citation, citationLabel, "引用網址")
+            return
+
+        writeOk := false
+        saveOk := false
+        try {
+            ranges.citation.NumberFormat := "@"
+            ranges.citation.Value2 := sourceUrl
+            writeOk := true
+        } catch Error {
+            this.status.ShowWarning(
+                BuildStatus("url_write_failed", "", "", "", "", citationLabel)
+            )
+            return
+        }
+
+        try {
+            this.workbook.Save()
+            saveOk := true
+        } catch Error {
+            this.status.ShowWarning(BuildStatus("url_save_failed"))
+            return
+        }
+
+        if !CanAdvance(true, writeOk, saveOk)
+            return
+
+        urlPreview := BuildPreview(sourceUrl, 40, 1)
+        this.citationColumnOffset += 1
+        this.closeContext := "source"
+        nextRanges := this.CurrentRanges()
+        this.status.ShowSuccess(
+            BuildStatus(
+                "url_saved",
+                "",
+                "",
+                "",
+                urlPreview,
+                citationLabel,
+                this.CellLabel(nextRanges.citation)
+            ),
+            2500
+        )
+    }
+
+    CopyAddressBarAttempt(chromeHwnd, copyVersion, attempt) {
+        this.EnsureUrlCopyTarget(chromeHwnd, copyVersion)
+        SendEvent("^l")
+        Sleep(Random(350, 500) + (attempt - 1) * 200)
+        this.EnsureUrlCopyTarget(chromeHwnd, copyVersion)
+
+        ; 每次重試都重新清空，避免把問題或上一次的剪貼簿誤當成這次結果。
+        A_Clipboard := ""
+        SendEvent("^c")
+        hasText := ClipWait(2)
+        this.EnsureUrlCopyTarget(chromeHwnd, copyVersion)
+        return hasText ? A_Clipboard : ""
+    }
+
+    EnsureUrlCopyTarget(chromeHwnd, copyVersion) {
+        ; 新動作取消舊的複製，不鎖住任何快捷鍵。
+        if !this.enabled || this.urlCopyVersion != copyVersion
+            throw TargetError("網址複製已由另一個動作取消")
+
+        if !WinActive("ahk_id " . chromeHwnd) {
+            this.status.ShowInfo(BuildStatus("url_copy_cancelled"))
+            throw TargetError("網址複製的來源視窗已失去焦點")
+        }
+    }
+
+    CopyAndSaveAnswer(*) {
+        this.urlCopyVersion += 1
+        if !this.IsFocusedChrome() {
+            this.status.ShowWarning(BuildStatus("wrong_window"))
             return
         }
 
         ranges := this.CurrentRanges()
+        answerText := A_Clipboard
+        currentQuestion := this.ReadCellText(ranges.question)
+        questionForCheck := this.lastSentQuestion != "" ? this.lastSentQuestion : currentQuestion
+        clipboardIssue := AnswerClipboardIssue(
+            answerText,
+            questionForCheck,
+            this.lastSavedAnswer
+        )
+        switch clipboardIssue {
+            case "empty":
+                this.status.ShowWarning(BuildStatus("copy_failed"))
+                return
+            case "url":
+                this.status.ShowWarning(BuildStatus("answer_is_url"))
+                return
+            case "question":
+                this.status.ShowWarning(BuildStatus("answer_is_question"))
+                return
+            case "duplicate":
+                this.status.ShowWarning(BuildStatus("answer_duplicate"))
+                return
+        }
+
         answerLabel := this.CellLabel(ranges.answer)
+        if !this.ConfirmOverwrite(ranges.answer, answerLabel, "回答")
+            return
+
         copyOk := true
         writeOk := false
         saveOk := false
@@ -245,7 +419,11 @@ class ChatGPTExcelAssistant {
             return
 
         answerPreview := BuildPreview(answerText, 20, 2)
+        this.lastSavedAnswer := answerText
+        this.closeContext := "answer"
+        this.lastSentQuestion := ""
         this.rowOffset += 1
+        this.citationColumnOffset := 0
         nextRanges := this.CurrentRanges()
         this.status.ShowSuccess(
             BuildStatus(
@@ -253,7 +431,8 @@ class ChatGPTExcelAssistant {
                 "",
                 answerLabel,
                 this.CellLabel(nextRanges.question),
-                answerPreview
+                answerPreview,
+                this.CellLabel(nextRanges.citation)
             ),
             2500
         )
@@ -264,20 +443,18 @@ class ChatGPTExcelAssistant {
             this.status.ClearWarning()
     }
 
-    CloseFocusedChromeWindow(*) {
-        if !this.CanRunAction()
-            return
+    CloseFocusedChromeTab(*) {
+        this.urlCopyVersion += 1
         if !this.IsFocusedChrome() {
             this.status.ShowWarning(BuildStatus("wrong_window"))
             return
         }
 
-        Send("!{F4}")
-        this.status.ShowSuccess(BuildStatus("closed"), 2500)
-    }
-
-    CanRunAction() {
-        return !this.status.HasWarning()
+        Send("^w")
+        statusKind := this.closeContext = "source" ? "closed_source"
+            : this.closeContext = "answer" ? "closed_answer" : "closed"
+        this.closeContext := ""
+        this.status.ShowSuccess(BuildStatus(statusKind), 2500)
     }
 
     ShowCurrentQuestionPreview() {
@@ -292,7 +469,16 @@ class ChatGPTExcelAssistant {
 
         preview := BuildPreview(questionText, 20, 2)
         this.status.ShowInfo(
-            BuildStatus("preview", questionLabel, "", "", preview),
+            BuildStatus(
+                "preview",
+                questionLabel,
+                "",
+                "",
+                preview,
+                "",
+                "",
+                this.platform.name
+            ),
             true
         )
     }
@@ -300,8 +486,45 @@ class ChatGPTExcelAssistant {
     CurrentRanges() {
         return {
             question: this.questionStart.Offset(this.rowOffset, 0),
-            answer: this.answerStart.Offset(this.rowOffset, 0)
+            answer: this.answerStart.Offset(this.rowOffset, 0),
+            citation: this.citationStart.Offset(
+                this.rowOffset,
+                this.citationColumnOffset
+            )
         }
+    }
+
+    RangeHasContent(range) {
+        try {
+            if range.HasFormula
+                return true
+            value := range.Value2
+        } catch Error {
+            return true
+        }
+
+        if IsObject(value)
+            return true
+        return value . "" != ""
+    }
+
+    ConfirmOverwrite(range, cellLabel, dataName) {
+        if !this.RangeHasContent(range)
+            return true
+
+        choice := MsgBox(
+            cellLabel . " 已有資料。`n`n是否以目前的" . dataName . "覆蓋？",
+            "確認覆蓋",
+            "YesNo Icon!"
+        )
+        if choice = "Yes"
+            return true
+
+        this.status.ShowInfo(
+            BuildStatus("overwrite_cancelled", "", "", "", "", cellLabel),
+            false
+        )
+        return false
     }
 
     CellLabel(range) {
@@ -372,6 +595,8 @@ class ChatGPTExcelAssistant {
         this.status.Shutdown()
         this.questionStart := 0
         this.answerStart := 0
+        this.citationStart := 0
+        this.platform := 0
         this.workbook := 0
         this.excel := 0
     }
